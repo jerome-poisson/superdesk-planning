@@ -12,15 +12,16 @@
 
 import superdesk
 import logging
-import json
 from superdesk import get_resource_service
 from superdesk.metadata.utils import generate_guid
 from superdesk.metadata.item import GUID_NEWSML
-from apps.archive.common import set_original_creator
+from superdesk.notification import push_notification
+from apps.archive.common import set_original_creator, get_user
+from .common import STATE_SCHEMA
 from dateutil.rrule import rrule, YEARLY, MONTHLY, WEEKLY, DAILY, MO, TU, WE, TH, FR, SA, SU
 from eve.defaults import resolve_default_values
 from eve.methods.common import resolve_document_etag
-from eve.utils import config, ParsedRequest
+from eve.utils import config
 from flask import current_app as app
 import itertools
 import copy
@@ -77,13 +78,19 @@ class EventsService(superdesk.Service):
         generatedEvents = []
         for event in docs:
             # generates an unique id
-            event['guid'] = generate_guid(type=GUID_NEWSML)
+            if 'guid' not in event:
+                event['guid'] = generate_guid(type=GUID_NEWSML)
+            event['_id'] = event['guid']
             # set the author
             set_original_creator(event)
-            setRecurringMode(event)
+
+            # overwrite expiry date
+            overwrite_event_expiry_date(event)
+
             # generates events based on recurring rules
-            if event['dates'].get('recurring_rule', {}).get('frequency'):
+            if event['dates'].get('recurring_rule', None):
                 # generate a common id for all the events we will generate
+                setRecurringMode(event)
                 recurrence_id = generate_guid(type=GUID_NEWSML)
                 # compute the difference between start and end in the original event
                 time_delta = event['dates']['end'] - event['dates']['start']
@@ -92,7 +99,7 @@ class EventsService(superdesk.Service):
                     start=event['dates']['start'],
                     tz=event['dates'].get('tz') and pytz.timezone(event['dates']['tz'] or None),
                     **event['dates']['recurring_rule']
-                ), 0, 1000):  # set a limit to prevent too many events to be created
+                ), 0, 200):  # set a limit to prevent too many events to be created
                     # create event with the new dates
                     new_event = copy.deepcopy(event)
                     new_event['dates']['start'] = date
@@ -102,30 +109,151 @@ class EventsService(superdesk.Service):
                     new_event['_id'] = new_event['guid']
                     # set the recurrence id
                     new_event['recurrence_id'] = recurrence_id
+
+                    # set expiry date
+                    overwrite_event_expiry_date(new_event)
+
                     generatedEvents.append(new_event)
                 # remove the event that contains the recurring rule. We don't need it anymore
                 docs.remove(event)
         if generatedEvents:
             docs.extend(generatedEvents)
 
-    def on_delete(self, doc):
-        # If the event has planning, delete them
-        planning_service = get_resource_service('planning')
-        coverage_service = get_resource_service('coverage')
-        query = {
-            'event_item': str(doc['_id'])
-        }
-        req = ParsedRequest()
-        req.where = json.dumps(query)
+    def on_created(self, docs):
+        """Send WebSocket Notifications for created Events
 
-        for planning in planning_service.get(req=req, lookup=None):
-            planning_service.delete_action(lookup={'_id': planning['_id']})
-            # If the planning item is related to any coverages, delete them too
-            for coverage in coverage_service.find(where={'planning_item': planning['_id']}):
-                coverage_service.delete({'_id': coverage['_id']})
+        Generate the list of IDs for recurring and non-recurring events
+        Then send this list off to the clients so they can fetch these events
+        """
+        notifications_sent = []
+
+        for doc in docs:
+            event_type = 'events:created'
+            event_id = str(doc.get(config.ID_FIELD))
+            user_id = str(doc.get('original_creator', ''))
+
+            if doc.get('recurrence_id'):
+                event_type = 'events:created:recurring'
+                event_id = str(doc['recurrence_id'])
+
+            # Don't send notification if one has already been sent
+            # This is to ensure recurring events to send multiple notifications
+            if event_id in notifications_sent:
+                continue
+
+            notifications_sent.append(event_id)
+            push_notification(
+                event_type,
+                item=event_id,
+                user=user_id
+            )
 
     def on_update(self, updates, original):
+        if 'skip_on_update' in updates:
+            # this is an recursive update(see below)
+            del updates['skip_on_update']
+            return
+
+        user = get_user()
+        if user and user.get(config.ID_FIELD):
+            updates['version_creator'] = user[config.ID_FIELD]
+
+        # The rest of this update function expects 'dates' to be in updates
+        # This can cause issues, as a workaround for now add the dictionary in manually
+        # Until a better fix can be implemented
+        if 'dates' not in updates:
+            updates['dates'] = {}
+
+        if not updates['dates'].get('recurring_rule', None):
+            # we keep the orignal and set it as not recursive
+            updates['dates']['recurring_rule'] = None
+            updates['recurrence_id'] = None
+            # we spike all the related recurrent events
+            if 'recurrence_id' in original:
+                # retieve all the related events
+                events = self.find(where={
+                    # all the events created from the same rec rules
+                    'recurrence_id': original['recurrence_id'],
+                    # except the original
+                    '_id': {'$ne': original['_id']},
+                    # only future ones
+                    'dates.start': {'$gt': original['dates']['start']},
+                })
+                spike_service = get_resource_service('events_spike')
+                # spike them
+                for event in events:
+                    spike_service.patch(event[config.ID_FIELD], {})
+            push_notification(
+                'events:updated',
+                item=str(original[config.ID_FIELD]),
+                user=str(updates.get('version_creator', ''))
+            )
+            return
+
+        # update all following events
         setRecurringMode(updates)
+        updates['recurrence_id'] = original.get('recurrence_id', None) or generate_guid(type=GUID_NEWSML)
+        # get the list of all items that follows the current edited one
+        if not original['dates'].get('recurring_rule', None):
+            existingEvents = [original]
+        else:
+            existingEvents = self.find(where={'recurrence_id': updates['recurrence_id']})
+            existingEvents = [
+                event for event in existingEvents
+                if event['dates']['start'] >= original['dates']['start']
+            ]
+        # compute the difference between start and end in the original event
+        time_delta = updates['dates']['end'] - updates['dates']['start']
+        addEvents = []
+        # generate the dates for the following events
+        dates = [date for date in itertools.islice(generate_recurring_dates(
+            start=updates['dates']['start'],
+            tz=updates['dates'].get('tz') and pytz.timezone(updates['dates']['tz'] or None),
+            **updates['dates']['recurring_rule']
+        ), 0, 200)]
+
+        for event, date in itertools.zip_longest(existingEvents, dates):
+            if not date:
+                # date is not present so the current event should be deleted
+                self.delete({'_id': event['_id']})
+                get_resource_service('events_history').on_item_deleted(event)
+            elif not event:
+                # the event is not present so a new event should be created
+                new_event = copy.deepcopy(original)
+                new_updates = copy.deepcopy(updates)
+                new_event.update(new_updates)
+                new_event['dates']['start'] = date
+                new_event['dates']['end'] = date + time_delta
+                # set a unique guid
+                new_event['guid'] = generate_guid(type=GUID_NEWSML)
+                new_event['_id'] = new_event['guid']
+                # set the recurrence id
+                addEvents.append(new_event)
+            elif event['_id'] == original['_id']:
+                updates['dates']['start'] = date
+                updates['dates']['end'] = date + time_delta
+            else:
+                # update the event with the new date and new updates
+                new_updates = copy.deepcopy(updates)
+                if 'guid' in new_updates:
+                    del new_updates['guid']
+                new_updates['dates']['start'] = date
+                new_updates['dates']['end'] = date + time_delta
+                new_updates['skip_on_update'] = True
+                # set the recurrence id
+                self.patch(event['_id'], new_updates)
+
+        if addEvents:
+            # add all new events
+            self.create(addEvents)
+            get_resource_service('events_history').on_item_created(addEvents)
+
+        push_notification(
+            'events:updated:recurring',
+            item=str(original[config.ID_FIELD]),
+            recurrence_id=str(updates['recurrence_id']),
+            user=str(updates.get('version_creator', ''))
+        )
 
 
 events_schema = {
@@ -154,7 +282,8 @@ events_schema = {
     },
     'recurrence_id': {
         'type': 'string',
-        'mapping': not_analyzed
+        'mapping': not_analyzed,
+        'nullable': True,
     },
 
     # Audit Information
@@ -170,8 +299,7 @@ events_schema = {
     # Ingest Details
     'ingest_provider': superdesk.Resource.rel('ingest_providers'),
     'source': {     # The value is copied from the ingest_providers vocabulary
-        'type': 'string',
-        'mapping': not_analyzed
+        'type': 'string'
     },
     'original_source': {    # This value is extracted from the ingest
         'type': 'string',
@@ -181,7 +309,12 @@ events_schema = {
         'type': 'string',
         'mapping': not_analyzed
     },
-
+    'event_created': {
+        'type': 'datetime'
+    },
+    'event_lastmodified': {
+        'type': 'datetime'
+    },
     # Event Details
     # NewsML-G2 Event properties See IPTC-G2-Implementation_Guide 15.2
     'name': {
@@ -247,8 +380,9 @@ events_schema = {
                     'bymonth': {'type': 'string', 'nullable': True},
                     'byday': {'type': 'string', 'nullable': True},
                     'byhour': {'type': 'string', 'nullable': True},
-                    'byminute': {'type': 'string', 'nullable': True}
-                }
+                    'byminute': {'type': 'string', 'nullable': True},
+                },
+                'nullable': True
             },
             'occur_status': {
                 'nullable': True,
@@ -374,7 +508,15 @@ events_schema = {
                 'name': not_analyzed
             }
         }
+    },
+
+    # These next two are for spiking/unspiking and purging events
+    'state': STATE_SCHEMA,
+    'expiry': {
+        'type': 'datetime',
+        'nullable': True
     }
+
 }  # end events_schema
 
 
@@ -392,11 +534,10 @@ class EventsResource(superdesk.Resource):
         'source': 'events',
         'search_backend': 'elastic',
     }
-    item_methods = ['GET', 'PATCH', 'PUT', 'DELETE']
+    item_methods = ['GET', 'PATCH', 'PUT']
     public_methods = ['GET']
-    privileges = {'POST': 'planning',
-                  'PATCH': 'planning',
-                  'DELETE': 'planning'}
+    privileges = {'POST': 'planning_event_management',
+                  'PATCH': 'planning_event_management'}
 
 
 def generate_recurring_dates(start, frequency, interval=1, endRepeatMode='unlimited',
@@ -469,3 +610,8 @@ def setRecurringMode(event):
         event['dates']['recurring_rule']['until'] = None
     elif endRepeatMode == 'until':
         event['dates']['recurring_rule']['count'] = None
+
+
+def overwrite_event_expiry_date(event):
+    if 'expiry' in event:
+        event['expiry'] = event['dates']['end']

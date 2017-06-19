@@ -1,0 +1,44 @@
+@import '~superdesk-core/styles/sass/variables.scss';
+
+$EVENT_LIST_CONTAINER_ZINDEX: 6;
+.Events-list-container {
+    height: 100%;
+}
+
+.Events-list-container__header {
+    z-index: $EVENT_LIST_CONTAINER_ZINDEX + 1;
+}
+
+.Events-list-container__body {
+    position: absolute;
+    top: $nav-height * 2;
+    right: 0;
+    left: 0;
+    bottom: 0;
+    display: flex;
+}
+.Events-list-container__search {
+    display: flex;
+    z-index: $EVENT_LIST_CONTAINER_ZINDEX !important;
+    .btn--primary {
+        white-space: nowrap;
+        margin: 5px;
+    }
+    .search-handler {
+        padding-left: 0;
+    }
+    .advanced-search-open {
+        width: 28px;
+        height: 28px;
+        display: inline-block;
+        opacity: 0.5;
+        margin: 16px 0 0 16px;
+        cursor: pointer;
+    }
+    .flat-searchbar {
+        flex-grow: 1;
+        .search-handler {
+            border-right: 0px solid black;
+        }
+    }
+}

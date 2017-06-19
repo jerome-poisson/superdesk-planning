@@ -1,9 +1,8 @@
 import React, { PropTypes } from 'react'
-import DatePicker from 'react-datepicker'
-import TimePicker from 'rc-time-picker'
+import { DatePicker } from '../index'
+import { TimePicker } from '../index'
 import moment from 'moment'
 import 'react-datepicker/dist/react-datepicker.css'
-import 'rc-time-picker/assets/index.css'
 import './style.scss'
 
 export class DayPickerInput extends React.Component {
@@ -82,14 +81,16 @@ export class DayPickerInput extends React.Component {
     }
 
     onTimeChange(selectedTime) {
-        this.setState({
-            selectedTime,
-            dateManuallyDefined: true,
-        },
-            () => {
-                this.updateValueFromState()
-            }
-        )
+        if (selectedTime) {
+            this.setState({
+                selectedTime,
+                dateManuallyDefined: true,
+            },
+                () => {
+                    this.updateValueFromState()
+                }
+            )
+        }
     }
 
     updateValueFromState() {
@@ -112,33 +113,25 @@ export class DayPickerInput extends React.Component {
     }
 
     render() {
-        const { disabled, withTime, selectsEnd, selectsStart, startDate, endDate } = this.props
+        const { withTime, readOnly } = this.props
         const { touched, error, warning } = this.props.meta
         const { selectedDate, selectedTime } = this.state
         return (
             <span className="day-picker-input">
                 <DatePicker
                     ref="datePicker"
-                    placeholderText="Date"
-                    disabled={disabled}
-                    className="line-input"
-                    selectsEnd={selectsEnd}
-                    selectsStart={selectsStart}
-                    startDate={startDate}
-                    endDate={endDate}
-                    selected={selectedDate}
+                    value={selectedDate}
+                    placeholder="Date"
                     onChange={this.onDayChange.bind(this)}
-                    fixedHeight />
+                    readOnly={readOnly} />
                 {(withTime === true) && (
                     <span>
                         &nbsp;&nbsp;&nbsp;&nbsp;
                         <TimePicker
-                            disabled={disabled}
-                            placeholder="Time"
                             value={selectedTime}
-                            showSecond={false}
-                            hideDisabledOptions={true}
-                            onChange={this.onTimeChange.bind(this)} />
+                            placeholder="Time"
+                            onChange={this.onTimeChange.bind(this)}
+                            readOnly={readOnly} />
                     </span>
                 )}
                 {
@@ -152,13 +145,9 @@ export class DayPickerInput extends React.Component {
 DayPickerInput.propTypes = {
     withTime: PropTypes.bool,
     defaultDate: PropTypes.object,
+    readOnly: PropTypes.bool,
     input: PropTypes.object,
     meta: PropTypes.object,
-    disabled: PropTypes.bool,
-    selectsEnd: PropTypes.bool,
-    selectsStart: PropTypes.bool,
-    startDate: PropTypes.object,
-    endDate: PropTypes.object,
 }
 DayPickerInput.defaultProps = {
     withTime: false,

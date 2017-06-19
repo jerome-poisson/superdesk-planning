@@ -1,6 +1,5 @@
 @import '~superdesk-core/styles/sass/mixins.scss';
 @import '~superdesk-core/styles/sass/variables.scss';
-@import './typeahead.scss';
 
 @mixin absolute0 {
     position: absolute;
@@ -17,16 +16,20 @@
         padding: 0;
         button {border: 0;}
     }
-    .subnav { top: 0; }
+    .subnav {
+        .subnav__button-stack--square-buttons { margin: 0; }
+        .navbtn { // back button
+            border-right: 1px solid rgba(0, 0, 0, 0.1);
+            border-left: 0;
+            button { background-color: transparent; }
+        }
+    }
+
+    .subnav {
+        position: relative;
+        top: initial;
+    }
     .ui-resizable { position: absolute; }
-}
-.Planning__planning {
-    position: relative;
-    padding-top: $nav-height;
-    transition-property: width;
-    transition-duration: .25s;
-    overflow: auto;
-    height: 100%;
 }
 
 // a vertical align on this class ensure an aligned icon with text.

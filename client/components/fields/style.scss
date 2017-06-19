@@ -13,3 +13,16 @@
 	font-size: 13px;
 	font-weight: normal;
 }
+
+.disabledInput {
+	&:hover:disabled {
+		cursor: default;
+	}
+}
+
+.disabledButton {
+	opacity: 0;
+	&:hover {
+		cursor: default;
+	}
+}
